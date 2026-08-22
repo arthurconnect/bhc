@@ -15,7 +15,8 @@ select
   s.order_id, s.order_number, s.created_at_utc, s.processed_at_utc, s.cancelled_at_utc,
   s.customer_email, s.customer_id, s.financial_status, s.fulfillment_status, s.cancel_reason,
   s.subtotal, s.shipping_charged, s.tax, s.discount, s.total, s.source_name,
-  s.landing_site, s.referring_site, s.utm_source, s.utm_medium, s.utm_campaign, s.tags, now()
+  s.landing_site, s.referring_site, s.utm_source, s.utm_medium, s.utm_campaign,
+  coalesce(s.tags, ''), now()   -- a CSV import turns an empty tag list into NULL; the table's convention is ''
 from public.staging_shopify_orders s
 on conflict (order_id) do update set
   order_number       = excluded.order_number,
