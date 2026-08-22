@@ -11,6 +11,9 @@ shopify_order_line_items so the two sets join cleanly:
   * line_item_id                                     -> full "gid://shopify/LineItem/..." string
   * GraphQL enums                                    -> left UPPERCASE (PAID, UNFULFILLED, ...)
   * tags                                             -> ", "-joined string, "" when empty (never NULL)
+  * title                                            -> lineItem.name (product + variant), matching Make
+  * attribution                                      -> customerJourneySummary.firstVisit for all four
+                                                        of landing_site / referring_site / utm_*
 """
 
 import decimal
@@ -27,7 +30,8 @@ ORDER_COLUMNS = (
 
 LINE_ITEM_COLUMNS = (
     "line_item_id", "order_id", "sku", "product_id", "variant_id", "title",
-    "quantity", "unit_price", "unit_discount", "line_total", "fulfillable_quantity",
+    "quantity", "unit_price", "unit_discount", "line_total", "fulfillment_status",
+    "fulfillable_quantity",
 )
 
 
@@ -52,7 +56,14 @@ def money(obj, *path):
 
 
 def build_order(node):
-    last_visit = dig(node, "customerJourneySummary", "lastVisit")
+    # First-touch attribution for all four fields. Note that Order.landingPageUrl /
+    # Order.referrerUrl are deprecated aliases of lastVisit, so using them alongside
+    # firstVisit UTMs (as the Make scenario used to) mixes two opposite models.
+    first_visit = dig(node, "customerJourneySummary", "firstVisit")
+    # ~500 orders carry no visit data at all but still have the deprecated
+    # order-level fields, so fall back to those rather than blanking attribution.
+    landing = dig(first_visit, "landingPage") or node.get("landingPageUrl")
+    referrer = dig(first_visit, "referrerUrl") or node.get("referrerUrl")
     return (
         gid_to_num(node["id"]),
         node.get("name"),
@@ -70,16 +81,36 @@ def build_order(node):
         money(node, "totalDiscountsSet"),
         money(node, "totalPriceSet"),
         node.get("sourceName"),
-        dig(last_visit, "landingPage"),
-        dig(last_visit, "referrerUrl"),
-        dig(last_visit, "utmParameters", "source"),
-        dig(last_visit, "utmParameters", "medium"),
-        dig(last_visit, "utmParameters", "campaign"),
+        landing,
+        referrer,
+        dig(first_visit, "utmParameters", "source"),
+        dig(first_visit, "utmParameters", "medium"),
+        dig(first_visit, "utmParameters", "campaign"),
         ", ".join(node.get("tags") or []),
     )
 
 
-def build_line_item(node):
+def line_item_fulfillment_status(node, order_cancelled):
+    """Derive per-line fulfillment state. Mirrors the expression in the Make
+    scenario exactly, so backfilled rows and synced rows always agree.
+
+    unfulfilledQuantity == 0 means "nothing left to fulfill", which is also true
+    of a cancelled order - hence the explicit CANCELLED branch first, so a
+    cancelled line is never mislabelled as shipped.
+    """
+    if order_cancelled:
+        return "CANCELLED"
+    unfulfilled = node.get("unfulfilledQuantity")
+    if unfulfilled is None:
+        return None
+    if unfulfilled == 0:
+        return "FULFILLED"
+    if unfulfilled >= node["quantity"]:
+        return "UNFULFILLED"
+    return "PARTIALLY_FULFILLED"
+
+
+def build_line_item(node, order_cancelled=False):
     # The export carries per-unit list price, per-unit discounted price and the
     # line's discounted total. unit_discount is the per-unit reduction, so the
     # invariant line_total == quantity * (unit_price - unit_discount) holds.
@@ -91,11 +122,12 @@ def build_line_item(node):
         node.get("sku"),
         gid_to_num(dig(node, "product", "id")),
         gid_to_num(dig(node, "variant", "id")),
-        node.get("title"),
+        node.get("name") or node.get("title"),   # lineItem.name: product + variant
         node["quantity"],
         str(original.quantize(CENTS)),
         str((original - discounted).quantize(CENTS)),
         money(node, "discountedTotalSet"),
+        line_item_fulfillment_status(node, order_cancelled),
         node.get("unfulfilledQuantity"),
     )
 
@@ -103,6 +135,7 @@ def build_line_item(node):
 def parse(path):
     """Return (orders, line_items) as lists of tuples in *_COLUMNS order."""
     orders, line_items = [], []
+    cancelled = {}          # order GID -> whether the order is cancelled
     with open(path, encoding="utf-8") as handle:
         for lineno, raw in enumerate(handle, 1):
             raw = raw.strip()
@@ -113,8 +146,11 @@ def parse(path):
             except json.JSONDecodeError as exc:
                 raise SystemExit(f"{path}:{lineno}: invalid JSON: {exc}") from exc
             if "__parentId" in node:
-                line_items.append(build_line_item(node))
+                line_items.append(
+                    build_line_item(node, cancelled.get(node["__parentId"], False))
+                )
             else:
+                cancelled[node["id"]] = bool(node.get("cancelledAt"))
                 orders.append(build_order(node))
     return orders, line_items
 
@@ -139,7 +175,10 @@ def check(orders, line_items):
         problems.append(f"{len(orphans)} line-item parent order(s) missing from export")
 
     for row in line_items:
-        qty, price, disc, total = row[6], decimal.Decimal(row[7]), decimal.Decimal(row[8]), decimal.Decimal(row[9])
+        qty = row[LINE_ITEM_COLUMNS.index("quantity")]
+        price = decimal.Decimal(row[LINE_ITEM_COLUMNS.index("unit_price")])
+        disc = decimal.Decimal(row[LINE_ITEM_COLUMNS.index("unit_discount")])
+        total = decimal.Decimal(row[LINE_ITEM_COLUMNS.index("line_total")])
         if abs(qty * (price - disc) - total) > decimal.Decimal("0.011"):
             problems.append(f"line_total mismatch on {row[0]}")
             break

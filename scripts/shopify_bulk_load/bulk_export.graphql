@@ -1,0 +1,63 @@
+# Bulk-operation query that produces the JSONL this loader expects.
+# Run from Shopify admin (Apps > your API client) or via graphql:
+#   mutation { bulkOperationRunQuery(query: """<the block below>""") {
+#     bulkOperation { id status } userErrors { field message } } }
+# Then poll:  { currentBulkOperation(type: QUERY) { status objectCount url } }
+# and download the `url` (served from storage.googleapis.com).
+#
+# Field choices mirror the "BHC-Get Shopify Orders" Make scenario exactly, so the
+# backfill and the hourly sync stay consistent:
+#   - lineItems.name  -> title           (product + variant)
+#   - firstVisit.*    -> landing_site / referring_site / utm_*   (first-touch)
+#   - landingPageUrl / referrerUrl are DEPRECATED aliases of lastVisit and are
+#     kept only as a fallback for the ~500 orders that have no visit data at all.
+{
+  orders(query: "created_at:>=2023-08-21") {
+    edges {
+      node {
+        id
+        name
+        createdAt
+        processedAt
+        cancelledAt
+        cancelReason
+        displayFinancialStatus
+        displayFulfillmentStatus
+        email
+        sourceName
+        tags
+        landingPageUrl
+        referrerUrl
+        customer { id defaultEmailAddress { emailAddress } }
+        customerJourneySummary {
+          firstVisit {
+            landingPage
+            referrerUrl
+            utmParameters { source medium campaign }
+          }
+        }
+        subtotalPriceSet { shopMoney { amount } }
+        totalShippingPriceSet { shopMoney { amount } }
+        totalTaxSet { shopMoney { amount } }
+        totalDiscountsSet { shopMoney { amount } }
+        totalPriceSet { shopMoney { amount } }
+        lineItems {
+          edges {
+            node {
+              id
+              name
+              sku
+              quantity
+              unfulfilledQuantity
+              product { id }
+              variant { id }
+              originalUnitPriceSet { shopMoney { amount } }
+              discountedUnitPriceSet { shopMoney { amount } }
+              discountedTotalSet { shopMoney { amount } }
+            }
+          }
+        }
+      }
+    }
+  }
+}

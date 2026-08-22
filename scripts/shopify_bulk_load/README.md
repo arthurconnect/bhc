@@ -32,6 +32,7 @@ python3 scripts/shopify_bulk_load/load.py export.jsonl --rest
 
 | File | Purpose |
 | --- | --- |
+| `bulk_export.graphql` | the bulk query that produces the expected JSONL |
 | `transform.py` | JSONL → typed rows, plus pre-flight validation |
 | `load.py` | staging load, count verification, merge driver |
 | `merge.sql` | the upsert; runnable on its own from the SQL editor |
@@ -57,8 +58,8 @@ Lines **without** `__parentId` are orders. Lines **with** one are line items who
 | `cancel_reason` | `cancelReason` | enum left UPPERCASE |
 | `subtotal` / `shipping_charged` / `tax` / `discount` / `total` | `subtotalPriceSet` / `totalShippingPriceSet` / `totalTaxSet` / `totalDiscountsSet` / `totalPriceSet` | `shopMoney.amount`, 2dp |
 | `source_name` | `sourceName` | |
-| `landing_site` / `referring_site` | `customerJourneySummary.lastVisit.landingPage` / `.referrerUrl` | |
-| `utm_source` / `utm_medium` / `utm_campaign` | `...lastVisit.utmParameters.*` | |
+| `landing_site` / `referring_site` | `customerJourneySummary.firstVisit.landingPage` / `.referrerUrl` | first-touch; falls back to the deprecated `landingPageUrl` / `referrerUrl` for the ~500 orders with no visit data |
+| `utm_source` / `utm_medium` / `utm_campaign` | `...firstVisit.utmParameters.*` | first-touch |
 | `tags` | `tags[]` | joined with `", "`; `''` when empty, never NULL |
 | `raw_json` | — | left NULL, matching the existing rows |
 
@@ -68,13 +69,14 @@ Lines **without** `__parentId` are orders. Lines **with** one are line items who
 | --- | --- | --- |
 | `line_item_id` | `id` | **full `gid://shopify/LineItem/...` string kept** |
 | `order_id` | `__parentId` | GID stripped |
-| `sku` / `title` / `quantity` | `sku` / `title` / `quantity` | |
+| `sku` / `quantity` | `sku` / `quantity` | |
+| `title` | `name` | product **+ variant**, matching the Make scenario |
 | `product_id` / `variant_id` | `product.id` / `variant.id` | GID stripped |
 | `unit_price` | `originalUnitPriceSet` | per-unit list price |
 | `unit_discount` | `originalUnitPriceSet − discountedUnitPriceSet` | per-unit reduction |
 | `line_total` | `discountedTotalSet` | net line total |
 | `fulfillable_quantity` | `unfulfilledQuantity` | |
-| `fulfillment_status` | — | not in the bulk export; left NULL |
+| `fulfillment_status` | derived | `CANCELLED` if the order is cancelled, else `FULFILLED` / `UNFULFILLED` / `PARTIALLY_FULFILLED` from `unfulfilledQuantity` vs `quantity`. Same expression as the Make scenario. |
 | `raw_json` | — | left NULL, matching the existing rows |
 
 These formats were read off the ~90 days of data already in the tables so the two sets
@@ -92,14 +94,26 @@ for every row, so `line_total == quantity × (unit_price − unit_discount)` hol
   a `line_total` that fails the arithmetic check aborts before anything is merged.
 * **Idempotent.** Re-running the same export is a no-op on row counts.
 
-## Validation performed on `f436f65d-stagingbulk6901246427378.jsonl`
+## Consistency with the hourly Make sync
+
+The `BHC-Get Shopify Orders` Make scenario (id 5166505) writes the same tables every
+hour. It previously used `createARow` (a plain INSERT), so each order was written once
+when first seen — while still UNFULFILLED — and never updated again; 928 of 945 rows
+carried a stale fulfillment/financial status. It also never mapped `unit_discount`,
+`fulfillment_status` or `fulfillable_quantity`, so those fell to the column defaults.
+
+It now uses `upsertARecord` and maps every field, using the identical conventions
+documented above. Backfilled rows and synced rows agree by construction.
+
+## Validation
 
 9,953 orders and 12,498 line items; no duplicate ids, no orphan line items, no order
 without line items; `createdAt` spans 2023-08-21 → 2026-08-21. Loaded against a local
 PostgreSQL mirror of the live schema seeded with a production-like 90-day overlap:
 945 orders / 1,222 line items updated in place, 9,008 / 11,276 inserted, final counts
 9,953 / 12,498. All 22,451 rows were then compared field-by-field against the source
-JSONL with zero mismatches, plus 400 independently re-derived spot checks.
+JSONL with zero mismatches, plus 400 independently re-derived spot checks. Line item
+titles were verified to match the rows already in Supabase (13/13 sampled).
 
 The PostgREST (`--rest`) path is a convenience fallback and has not been exercised
 end-to-end.
