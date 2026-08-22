@@ -48,7 +48,7 @@ insert into public.shopify_order_line_items as t (
   fulfillment_status, fulfillable_quantity, synced_at
 )
 select
-  s.line_item_id, s.order_id, s.sku, s.product_id, s.variant_id, s.title,
+  s.line_item_id, s.order_id, nullif(s.sku, ''), s.product_id, s.variant_id, s.title,
   s.quantity, s.unit_price, s.unit_discount, s.line_total,
   s.fulfillment_status, s.fulfillable_quantity, now()
 from public.staging_shopify_order_line_items s

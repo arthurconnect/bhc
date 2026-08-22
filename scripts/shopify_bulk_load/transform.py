@@ -119,7 +119,7 @@ def build_line_item(node, order_cancelled=False):
     return (
         node["id"],                                   # full GID, kept verbatim
         gid_to_num(node["__parentId"]),
-        node.get("sku"),
+        node.get("sku") or None,                      # "" and absent both mean "no SKU"
         gid_to_num(dig(node, "product", "id")),
         gid_to_num(dig(node, "variant", "id")),
         node.get("name") or node.get("title"),   # lineItem.name: product + variant
