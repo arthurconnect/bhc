@@ -4,11 +4,22 @@ Every GraphQL operation here was validated against the live 2026-07 Admin
 schema, and the staged-upload parameter names were read off a real
 stagedUploadsCreate response rather than taken from the build spec. See the
 README's "Verified against the live API" section.
+
+Two ways to authenticate:
+
+  * client_id + client_secret - the client credentials grant, used by apps
+    created in the Shopify Dev Dashboard. This is the current path: Shopify
+    retired admin-created custom apps, and a Dev Dashboard app never shows a
+    token in the admin at all. The client exchanges the credentials for a
+    24-hour token and refreshes it as needed.
+  * token - a long-lived shpat_ token from a legacy admin-created custom app.
+    Still accepted so existing installs keep working.
 """
 
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -89,15 +100,92 @@ def normalize_shop(shop):
 
 
 class ShopifyAdmin:
-    def __init__(self, shop, token, api_version=DEFAULT_API_VERSION, timeout=120,
+    def __init__(self, shop, token=None, client_id=None, client_secret=None,
+                 api_version=DEFAULT_API_VERSION, timeout=120,
                  max_retries=5, log=print):
         self.shop = normalize_shop(shop)
-        self.token = token
         self.api_version = api_version
         self.timeout = timeout
         self.max_retries = max_retries
         self.log = log
         self.endpoint = f"https://{self.shop}/admin/api/{api_version}/graphql.json"
+        self.token_endpoint = f"https://{self.shop}/admin/oauth/access_token"
+
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self._static_token = token or None
+        self._token = token or None
+        self._token_expires_at = None       # time.monotonic() deadline
+        self._token_margin = 0              # refresh this many seconds early
+        self.granted_scopes = None          # read back from the token response
+
+    # ---------------------------------------------------------------- token
+
+    def _fetch_token(self):
+        """Exchange client credentials for a 24-hour Admin API access token.
+
+        Only works when the app and the store are in the same Shopify
+        organization; otherwise Shopify answers shop_not_permitted, which is
+        surfaced verbatim because the fix is an org membership change, not
+        anything this script can retry its way out of.
+        """
+        body = urllib.parse.urlencode({
+            "grant_type": "client_credentials",
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+        }).encode()
+        request = urllib.request.Request(self.token_endpoint, data=body, method="POST")
+        request.add_header("Content-Type", "application/x-www-form-urlencoded")
+        request.add_header("Accept", "application/json")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                payload = json.loads(response.read().decode())
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode(errors="replace")[:500]
+            raise CredentialError(
+                f"Could not get an access token from {self.token_endpoint} "
+                f"(HTTP {exc.code}): {detail}"
+            ) from None
+        except urllib.error.URLError as exc:
+            raise CredentialError(
+                f"Could not reach {self.token_endpoint}: {exc.reason}"
+            ) from None
+
+        token = payload.get("access_token")
+        if not token:
+            raise CredentialError(f"Token endpoint returned no access_token: {payload}")
+        # expires_in is 86399 (24h). The margin makes a long bulk run refresh
+        # early rather than have a request land on a token that expired
+        # mid-flight; it never exceeds half the token's own lifetime, so an
+        # unexpectedly short-lived token is refetched instead of trusted.
+        raw_expiry = payload.get("expires_in")
+        expires_in = max(int(raw_expiry), 0) if raw_expiry is not None else 86399
+        self._token = token
+        self._token_expires_at = time.monotonic() + expires_in
+        self._token_margin = min(300, expires_in // 2)
+        self.granted_scopes = payload.get("scope")
+        return token
+
+    def _access_token(self):
+        if self._static_token:
+            return self._static_token
+        if not (self.client_id and self.client_secret):
+            raise CredentialError(
+                "No Shopify credential: set SHOPIFY_CLIENT_ID and "
+                "SHOPIFY_CLIENT_SECRET (Dev Dashboard app), or SHOPIFY_ADMIN_TOKEN "
+                "(legacy custom app)."
+            )
+        if self._token and self._token_expires_at is not None and \
+                time.monotonic() < self._token_expires_at - self._token_margin:
+            return self._token
+        return self._fetch_token()
+
+    def _invalidate_token(self):
+        """Drop the cached token so the next call fetches a fresh one."""
+        if not self._static_token:
+            self._token = None
+            self._token_expires_at = None
+            self._token_margin = 0
 
     # ------------------------------------------------------------- transport
 
@@ -106,26 +194,34 @@ class ShopifyAdmin:
         body = json.dumps({"query": query, "variables": variables or {}}).encode()
         delay = 1.0
         last = None
+        refreshed = False
         for attempt in range(1, self.max_retries + 1):
             request = urllib.request.Request(self.endpoint, data=body, method="POST")
             request.add_header("Content-Type", "application/json")
-            request.add_header("X-Shopify-Access-Token", self.token)
+            request.add_header("X-Shopify-Access-Token", self._access_token())
             request.add_header("Accept", "application/json")
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
                     payload = json.loads(response.read().decode())
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode(errors="replace")[:500]
-                if exc.code in (401, 403):
+                if exc.code == 401 and not self._static_token and not refreshed:
+                    # A 24-hour token can expire mid-run. Get a new one once,
+                    # then treat a second 401 as a real credential failure.
+                    self._invalidate_token()
+                    refreshed = True
+                    last = "401, refreshing the access token"
+                elif exc.code in (401, 403):
                     raise CredentialError(
-                        f"Shopify rejected the Admin API token ({exc.code}): {detail}"
+                        f"Shopify rejected the Admin API credential ({exc.code}): "
+                        f"{detail}"
                     ) from None
-                if exc.code == 404:
+                elif exc.code == 404:
                     raise CredentialError(
                         f"No Admin API at {self.endpoint} (404). Check SHOPIFY_SHOP "
                         f"and SHOPIFY_API_VERSION."
                     ) from None
-                if exc.code == 429 or exc.code >= 500:
+                elif exc.code == 429 or exc.code >= 500:
                     last = f"HTTP {exc.code}: {detail}"
                 else:
                     raise ShopifyError(f"HTTP {exc.code}: {detail}") from None
@@ -153,15 +249,40 @@ class ShopifyAdmin:
     # ------------------------------------------------------------ credential
 
     def check_credential(self):
-        """Prove the token works before anything else happens. Fatal on failure."""
+        """Prove the credential works before anything else happens.
+
+        Fatal on failure, and fatal on a credential that authenticates but
+        lacks write_customers - a token that cannot do the job is not a
+        working credential, and finding that out now beats finding out after
+        the operator has approved a run.
+        """
         if not self.shop:
             raise CredentialError("SHOPIFY_SHOP is not set")
-        if not self.token:
-            raise CredentialError("SHOPIFY_ADMIN_TOKEN is not set")
+        if not self._static_token and not (self.client_id and self.client_secret):
+            raise CredentialError(
+                "No Shopify credential. Set SHOPIFY_CLIENT_ID and "
+                "SHOPIFY_CLIENT_SECRET for a Dev Dashboard app, or "
+                "SHOPIFY_ADMIN_TOKEN for a legacy custom app."
+            )
+        self._access_token()          # fetches and validates, or raises
         data = self.graphql(_SHOP_QUERY)
         shop = (data or {}).get("shop")
         if not shop or not shop.get("myshopifyDomain"):
             raise CredentialError(f"unexpected response to shop query: {data}")
+
+        # The token response echoes back the scopes on the app's released
+        # version, so a missing one can be named exactly rather than surfacing
+        # later as an opaque per-customer permission error.
+        if self.granted_scopes is not None:
+            granted = {s.strip() for s in self.granted_scopes.split(",") if s.strip()}
+            missing = {"read_customers", "write_customers"} - granted
+            if missing:
+                raise CredentialError(
+                    f"The credential works, but is missing {', '.join(sorted(missing))}. "
+                    f"Granted: {self.granted_scopes or '(none)'}.\n"
+                    f"Add the scope to the app's version in the Dev Dashboard, "
+                    f"Release it, then re-approve the app on the store."
+                )
         return shop
 
     # ------------------------------------------------------ single-customer

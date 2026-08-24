@@ -25,6 +25,12 @@ Safety properties, in order of importance:
 Usage:
     export SUPABASE_DB_URL='postgresql://postgres.<ref>:<password>@<host>:5432/postgres'
     export SHOPIFY_SHOP='the-birdhouse-chick-2.myshopify.com'
+
+    # Dev Dashboard app (current): the client credentials grant
+    export SHOPIFY_CLIENT_ID='...'
+    export SHOPIFY_CLIENT_SECRET='...'
+
+    # or, for a legacy admin-created custom app:
     export SHOPIFY_ADMIN_TOKEN='shpat_...'
 
     python3 writeback.py                      # dry run, whole pending set
@@ -403,9 +409,11 @@ def main():
     # The credential is checked in dry run too: a bad token should surface now,
     # not at the top of the real pass.
     api = ShopifyAdmin(
-        os.environ.get("SHOPIFY_SHOP", ""),
-        os.environ.get("SHOPIFY_ADMIN_TOKEN", ""),
-        os.environ.get("SHOPIFY_API_VERSION") or DEFAULT_API_VERSION,
+        shop=os.environ.get("SHOPIFY_SHOP", ""),
+        token=os.environ.get("SHOPIFY_ADMIN_TOKEN") or None,
+        client_id=os.environ.get("SHOPIFY_CLIENT_ID") or None,
+        client_secret=os.environ.get("SHOPIFY_CLIENT_SECRET") or None,
+        api_version=os.environ.get("SHOPIFY_API_VERSION") or DEFAULT_API_VERSION,
         log=log,
     )
     try:
@@ -414,6 +422,8 @@ def main():
         raise SystemExit(f"Shopify credential problem: {exc}\nNothing was written.")
     log(f"shopify   : {shop['name']} ({shop['myshopifyDomain']}) "
         f"api {api.api_version}")
+    log(f"auth      : {'client credentials grant' if not api._static_token else 'access token'}"
+        + (f", scopes {api.granted_scopes}" if api.granted_scopes else ""))
 
     conn = db.connect(dsn)
     log("supabase  : connected")

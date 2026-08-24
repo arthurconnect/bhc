@@ -12,12 +12,18 @@ import json
 import os
 import sys
 import threading
+import time
 import unittest
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import tags                                    # noqa: E402
-from shopify_api import ShopifyAdmin, parse_bulk_results  # noqa: E402
+from shopify_api import (  # noqa: E402
+    CredentialError,
+    ShopifyAdmin,
+    parse_bulk_results,
+)
 
 
 class TagScheme(unittest.TestCase):
@@ -189,6 +195,141 @@ class BulkResults(unittest.TestCase):
         confirmed, failures, unrecognized = parse_bulk_results(raw, "tagsAdd")
         self.assertEqual(confirmed, set())
         self.assertEqual(unrecognized, 3)
+
+
+class _AuthHandler(http.server.BaseHTTPRequestHandler):
+    """Minimal stand-in for the token endpoint and the GraphQL endpoint."""
+
+    token_requests = []
+    scope = "read_customers,write_customers"
+    expires_in = 86399
+    fail_next_graphql_with_401 = False
+    graphql_tokens = []
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode()
+        if self.path.endswith("/admin/oauth/access_token"):
+            _AuthHandler.token_requests.append(
+                dict(urllib.parse.parse_qsl(body))
+            )
+            payload = {
+                "access_token": f"shpat_issued_{len(_AuthHandler.token_requests)}",
+                "scope": _AuthHandler.scope,
+                "expires_in": _AuthHandler.expires_in,
+            }
+            return self._json(200, payload)
+
+        _AuthHandler.graphql_tokens.append(
+            self.headers.get("X-Shopify-Access-Token")
+        )
+        if _AuthHandler.fail_next_graphql_with_401:
+            _AuthHandler.fail_next_graphql_with_401 = False
+            return self._json(401, {"errors": "[API] Invalid API key or access token"})
+        return self._json(200, {"data": {"shop": {
+            "name": "Test Shop", "myshopifyDomain": "test.myshopify.com"}}})
+
+    def _json(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args):
+        pass
+
+
+class ClientCredentialsGrant(unittest.TestCase):
+    """Dev Dashboard apps never expose a shpat_ token in the admin.
+
+    Shopify retired admin-created custom apps, so the current path is the
+    client credentials grant: exchange client id and secret for a 24-hour
+    token, and refresh it when it runs out.
+    """
+
+    def setUp(self):
+        _AuthHandler.token_requests = []
+        _AuthHandler.graphql_tokens = []
+        _AuthHandler.scope = "read_customers,write_customers"
+        _AuthHandler.expires_in = 86399
+        _AuthHandler.fail_next_graphql_with_401 = False
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), _AuthHandler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def _client(self, **kwargs):
+        api = ShopifyAdmin(shop="test.myshopify.com", log=lambda *_: None, **kwargs)
+        api.endpoint = f"{self.base}/admin/api/2026-07/graphql.json"
+        api.token_endpoint = f"{self.base}/admin/oauth/access_token"
+        return api
+
+    def test_credentials_are_exchanged_for_a_token(self):
+        api = self._client(client_id="cid", client_secret="secret")
+        shop = api.check_credential()
+
+        self.assertEqual(shop["myshopifyDomain"], "test.myshopify.com")
+        self.assertEqual(len(_AuthHandler.token_requests), 1)
+        self.assertEqual(_AuthHandler.token_requests[0], {
+            "grant_type": "client_credentials",
+            "client_id": "cid",
+            "client_secret": "secret",
+        })
+        self.assertEqual(_AuthHandler.graphql_tokens, ["shpat_issued_1"])
+
+    def test_token_is_cached_across_calls(self):
+        api = self._client(client_id="cid", client_secret="secret")
+        api.check_credential()
+        api.graphql("query shopCheck { shop { name myshopifyDomain } }")
+        self.assertEqual(len(_AuthHandler.token_requests), 1)
+        self.assertEqual(_AuthHandler.graphql_tokens,
+                         ["shpat_issued_1", "shpat_issued_1"])
+
+    def test_an_expired_token_is_refreshed_once_on_401(self):
+        # A 24-hour token can lapse in the middle of a long bulk run.
+        api = self._client(client_id="cid", client_secret="secret")
+        api.check_credential()
+        _AuthHandler.fail_next_graphql_with_401 = True
+        api.graphql("query shopCheck { shop { name myshopifyDomain } }")
+
+        self.assertEqual(len(_AuthHandler.token_requests), 2)
+        self.assertEqual(_AuthHandler.graphql_tokens[-1], "shpat_issued_2")
+
+    def test_an_expired_token_is_refetched_before_the_next_call(self):
+        api = self._client(client_id="cid", client_secret="secret")
+        api.check_credential()
+        self.assertEqual(len(_AuthHandler.token_requests), 1)
+
+        # Wind the clock past the token's life rather than sleeping for it.
+        api._token_expires_at = time.monotonic() - 1
+        api.graphql("query shopCheck { shop { name myshopifyDomain } }")
+
+        self.assertEqual(len(_AuthHandler.token_requests), 2)
+        self.assertEqual(_AuthHandler.graphql_tokens[-1], "shpat_issued_2")
+
+    def test_missing_write_scope_is_fatal_and_named(self):
+        _AuthHandler.scope = "read_customers"
+        api = self._client(client_id="cid", client_secret="secret")
+        with self.assertRaises(CredentialError) as caught:
+            api.check_credential()
+        self.assertIn("write_customers", str(caught.exception))
+
+    def test_no_credential_at_all_is_fatal(self):
+        api = self._client()
+        with self.assertRaises(CredentialError):
+            api.check_credential()
+        self.assertEqual(_AuthHandler.token_requests, [])
+
+    def test_a_legacy_static_token_still_works_and_is_never_exchanged(self):
+        api = self._client(token="shpat_legacy")
+        api.check_credential()
+        self.assertEqual(_AuthHandler.token_requests, [])
+        self.assertEqual(_AuthHandler.graphql_tokens, ["shpat_legacy"])
 
 
 class _CaptureHandler(http.server.BaseHTTPRequestHandler):
