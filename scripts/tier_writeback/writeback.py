@@ -71,6 +71,32 @@ def log(message=""):
     print(message, flush=True)
 
 
+# ---------------------------------------------------------------- credentials
+
+
+def choose_credentials(environ):
+    """Pick the Shopify credential out of the environment.
+
+    Returns (token, client_id, client_secret, note).
+
+    The client credentials grant wins when both are present. A stale
+    SHOPIFY_ADMIN_TOKEN still exported in a shell - editing the env file does
+    not unset what an earlier `source` already put there - is otherwise
+    invisible, and silently overrides a perfectly good client id and secret
+    with a 401 that reads as though the credentials themselves are wrong.
+    """
+    token = environ.get("SHOPIFY_ADMIN_TOKEN") or None
+    client_id = environ.get("SHOPIFY_CLIENT_ID") or None
+    client_secret = environ.get("SHOPIFY_CLIENT_SECRET") or None
+    note = None
+    if token and client_id and client_secret:
+        note = ("SHOPIFY_ADMIN_TOKEN is set as well; using the client "
+                "credentials grant and ignoring it. Run `unset "
+                "SHOPIFY_ADMIN_TOKEN` if it is left over from an earlier shell.")
+        token = None
+    return token, client_id, client_secret, note
+
+
 # ------------------------------------------------------------------- planning
 
 
@@ -408,11 +434,14 @@ def main():
 
     # The credential is checked in dry run too: a bad token should surface now,
     # not at the top of the real pass.
+    token, client_id, client_secret, note = choose_credentials(os.environ)
+    if note:
+        log(f"note      : {note}")
     api = ShopifyAdmin(
         shop=os.environ.get("SHOPIFY_SHOP", ""),
-        token=os.environ.get("SHOPIFY_ADMIN_TOKEN") or None,
-        client_id=os.environ.get("SHOPIFY_CLIENT_ID") or None,
-        client_secret=os.environ.get("SHOPIFY_CLIENT_SECRET") or None,
+        token=token,
+        client_id=client_id,
+        client_secret=client_secret,
         api_version=os.environ.get("SHOPIFY_API_VERSION") or DEFAULT_API_VERSION,
         log=log,
     )

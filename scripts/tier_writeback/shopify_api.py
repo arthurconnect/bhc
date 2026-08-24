@@ -212,9 +212,14 @@ class ShopifyAdmin:
                     refreshed = True
                     last = "401, refreshing the access token"
                 elif exc.code in (401, 403):
+                    # Name the credential actually used: a 401 while a stale
+                    # static token shadows the client id and secret otherwise
+                    # reads as "my client credentials are wrong".
+                    using = ("the SHOPIFY_ADMIN_TOKEN" if self._static_token
+                             else "the client credentials grant")
                     raise CredentialError(
-                        f"Shopify rejected the Admin API credential ({exc.code}): "
-                        f"{detail}"
+                        f"Shopify rejected the Admin API credential ({exc.code}) "
+                        f"using {using}: {detail}"
                     ) from None
                 elif exc.code == 404:
                     raise CredentialError(

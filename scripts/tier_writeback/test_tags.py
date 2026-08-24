@@ -19,6 +19,7 @@ import urllib.parse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import tags                                    # noqa: E402
+import writeback                               # noqa: E402
 from shopify_api import (  # noqa: E402
     CredentialError,
     ShopifyAdmin,
@@ -427,6 +428,41 @@ class StagedUploadBody(unittest.TestCase):
         self.assertGreater(body.index('name="file"'), max(positions),
                            "the file part must come last")
         self.assertIn(content.decode(), body)
+
+
+class CredentialPrecedence(unittest.TestCase):
+    """A stale SHOPIFY_ADMIN_TOKEN must not shadow the client credentials."""
+
+    def test_client_credentials_win_when_both_are_set(self):
+        token, cid, secret, note = writeback.choose_credentials({
+            "SHOPIFY_ADMIN_TOKEN": "shpat_stale",
+            "SHOPIFY_CLIENT_ID": "cid",
+            "SHOPIFY_CLIENT_SECRET": "secret",
+        })
+        self.assertIsNone(token)
+        self.assertEqual((cid, secret), ("cid", "secret"))
+        self.assertIn("unset SHOPIFY_ADMIN_TOKEN", note)
+
+    def test_a_lone_static_token_is_still_used(self):
+        token, cid, secret, note = writeback.choose_credentials(
+            {"SHOPIFY_ADMIN_TOKEN": "shpat_only"})
+        self.assertEqual(token, "shpat_only")
+        self.assertEqual((cid, secret, note), (None, None, None))
+
+    def test_a_half_set_client_credential_does_not_displace_the_token(self):
+        token, _cid, _secret, note = writeback.choose_credentials({
+            "SHOPIFY_ADMIN_TOKEN": "shpat_only",
+            "SHOPIFY_CLIENT_ID": "cid",          # secret missing
+        })
+        self.assertEqual(token, "shpat_only")
+        self.assertIsNone(note)
+
+    def test_empty_strings_count_as_unset(self):
+        token, cid, secret, _note = writeback.choose_credentials({
+            "SHOPIFY_ADMIN_TOKEN": "", "SHOPIFY_CLIENT_ID": "",
+            "SHOPIFY_CLIENT_SECRET": "",
+        })
+        self.assertEqual((token, cid, secret), (None, None, None))
 
 
 if __name__ == "__main__":

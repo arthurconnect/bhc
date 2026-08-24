@@ -62,7 +62,11 @@ verbatim, because the fix is an org membership change rather than anything it
 can retry.
 
 `SHOPIFY_ADMIN_TOKEN` is still accepted for a legacy custom app that already
-exists; set either that or the client id/secret pair.
+exists; set either that or the client id/secret pair. If both are set the client
+credentials grant wins and the run says so — a stale `SHOPIFY_ADMIN_TOKEN` left
+exported in a shell (editing the env file does not unset what an earlier
+`source` put there) would otherwise shadow a good client id and secret with a
+401 that looks like the credentials themselves are wrong.
 
 | Flag | Effect |
 | --- | --- |
@@ -284,7 +288,7 @@ not a bug, and it resolves only with a deeper backfill.
 
 ## Validation
 
-`python3 test_tags.py` — 29 tests, no credentials or live network needed. Covers
+`python3 test_tags.py` — 33 tests, no credentials or live network needed. Covers
 the tag table, the `at_risk`/`at-risk` mismatch, the Betty→Caroline climb leaving
 exactly one tier tag, case-insensitive matching with exact-case removal,
 unmanaged tags surviving, the bulk results parser (including an unexpected result
@@ -293,7 +297,8 @@ order with the file part last, and the client credentials grant — credentials
 exchanged for a token, the token cached across calls, an expired token refetched,
 a mid-run 401 refreshed exactly once, a missing `write_customers` scope named and
 fatal, `write_customers` alone accepted (Shopify folds read into write and the
-readback collapses the pair), and a legacy static token never exchanged.
+readback collapses the pair), and a legacy static token never exchanged. Also the credential precedence
+rules, so a stale `SHOPIFY_ADMIN_TOKEN` cannot shadow the client credentials.
 
 Beyond that, the whole job was run end to end against a local PostgreSQL mirror
 of the live schema, seeded with the real 8,672-customer August 2026 census, and a
