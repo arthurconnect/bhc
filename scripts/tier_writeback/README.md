@@ -326,7 +326,7 @@ customer records in the store, not by sampling:
   `Gift card recipient` 7, `Loox - Onsite Reviewer` 6, `Blocked` 2, and the
   one-offs `C/V`, `Repeat`, `OMFG`
 
-### The 694 retired tags still out there
+### The 694 retired tags outside the census — cleared 2026-08-24
 
 `VIP Betty` and `VIP Caroline` remained on 694 customers who are **not in
 `customer_tiers`** — no order inside the 36-month window, so the view never
@@ -357,6 +357,23 @@ that customer's own id. Two things it adds:
   from the store rather than from the API's confirmation.
 
 Safe to re-run: a second pass finds nothing and exits.
+
+**Result:** 694 carried a retired tag (`VIP Betty` 350, `VIP Caroline` 344 — one
+each, no overlap). 694 confirmed removed, 0 failed, 0 remaining. Verified against
+an independent export of all 55,437 customer records afterwards:
+
+* `VIP Betty` 0, `VIP Caroline` 0 — the retired scheme is gone from the store
+* 8,694 customers carry a `bhc-` tag, still 0 with anything other than exactly
+  one tier tag and one engagement tag
+* **0 non-retired tags lost by any customer** across the whole project — the
+  pre-write export was diffed against the final one, customer by customer, and
+  no record lost a single tag other than the two being retired
+
+The full store now reads: the 11 managed `bhc-` tags on the census, plus
+`Shop` / `Login with Shop` 1,287 each, `newsletter` 516, `discount code used`
+191, `prospect` 166, `Gift card recipient` 7, `Loox - Onsite Reviewer` 6,
+`Blocked` 2, and the one-offs `C/V`, `Repeat`, `OMFG` — every one of them
+untouched, count for count, from before the first write.
 
 ## Known limitation carried forward
 
