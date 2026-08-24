@@ -328,15 +328,35 @@ customer records in the store, not by sampling:
 
 ### The 694 retired tags still out there
 
-`VIP Betty` and `VIP Caroline` remain on 694 customers who are **not in
+`VIP Betty` and `VIP Caroline` remained on 694 customers who are **not in
 `customer_tiers`** — no order inside the 36-month window, so the view never
-returns them and `--all` cannot reach them. This is a property of scope, not a
-failure: the job only ever walks the census.
+returns them and `--all` cannot reach them. That is a property of scope, not a
+failure: `writeback.py` only ever walks the census.
 
-It self-heals for anyone who matters. A dormant customer who orders again enters
-the view and gets their retired tag stripped on the next run. Cleaning the rest
-would need a separate one-off pass keyed off a customer export rather than the
-view.
+`retire_tags.py` cleans them up. It works off a full Shopify customer export
+rather than the view, so it reaches every customer in the store:
+
+```bash
+python3 scripts/tier_writeback/retire_tags.py             # dry run
+python3 scripts/tier_writeback/retire_tags.py --execute
+```
+
+It needs only the Shopify credentials — no database connection, because it
+deliberately writes nothing to `customer_tier_state`. Those customers are not in
+the census and do not belong in a mirror of it.
+
+Same discipline as the main job: dry run by default, removes nothing but the
+tags in `RETIRED_TAGS`, and only records a customer as done when Shopify returns
+that customer's own id. Two things it adds:
+
+* **It prints the blast radius before acting.** The dry run lists every *other*
+  tag carried by the customers it is about to touch, with counts, so what
+  survives is visible rather than promised.
+* **It re-exports afterwards and reports what is still carrying a retired tag.**
+  This is the only run that will ever touch these customers, so the proof comes
+  from the store rather than from the API's confirmation.
+
+Safe to re-run: a second pass finds nothing and exits.
 
 ## Known limitation carried forward
 
@@ -353,6 +373,7 @@ not a bug, and it resolves only with a deeper backfill.
 | `tags.py` | the tag scheme and the add/remove diff — pure functions |
 | `shopify_api.py` | Admin API client: tagging, staged upload, bulk operations |
 | `db.py` | the source query, the `--all` query, and `customer_tier_state` reads/writes |
+| `retire_tags.py` | one-off cleanup of retired tags on customers outside the census |
 | `test_tags.py` | unit tests for the tag scheme, the diff, the bulk results parser and the staged-upload body |
 
 ## Validation
