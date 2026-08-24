@@ -275,10 +275,18 @@ class ShopifyAdmin:
         # later as an opaque per-customer permission error.
         if self.granted_scopes is not None:
             granted = {s.strip() for s in self.granted_scopes.split(",") if s.strip()}
-            missing = {"read_customers", "write_customers"} - granted
-            if missing:
+            # Shopify folds read into write - "any permission to write a
+            # resource includes permission to read it" - and collapses the
+            # pair in the readback, so an app granted both comes back as just
+            # write_customers. Demanding read_customers literally would reject
+            # a credential that can do everything this job needs.
+            can_write = "write_customers" in granted
+            can_read = can_write or "read_customers" in granted
+            if not (can_write and can_read):
+                missing = ([] if can_read else ["read_customers"]) + \
+                          ([] if can_write else ["write_customers"])
                 raise CredentialError(
-                    f"The credential works, but is missing {', '.join(sorted(missing))}. "
+                    f"The credential works, but is missing {', '.join(missing)}. "
                     f"Granted: {self.granted_scopes or '(none)'}.\n"
                     f"Add the scope to the app's version in the Dev Dashboard, "
                     f"Release it, then re-approve the app on the store."

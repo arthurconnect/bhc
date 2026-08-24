@@ -184,6 +184,7 @@ from prose:
 | polling | `bulkOperation(id: ID!)` |
 | token endpoint | `POST https://{shop}/admin/oauth/access_token`, form-encoded `grant_type=client_credentials` + `client_id` + `client_secret` |
 | token response | `{access_token, scope, expires_in}`; `expires_in` is 86399 (24h), and `scope` reads back what the app's released version actually grants |
+| scope readback | `write_customers` alone means read **and** write — Shopify folds read into write and collapses the pair, so an app granted `read_customers,write_customers` reads back as `write_customers` |
 
 Two places where the spec would have gone wrong if followed literally:
 
@@ -283,7 +284,7 @@ not a bug, and it resolves only with a deeper backfill.
 
 ## Validation
 
-`python3 test_tags.py` — 27 tests, no credentials or live network needed. Covers
+`python3 test_tags.py` — 29 tests, no credentials or live network needed. Covers
 the tag table, the `at_risk`/`at-risk` mismatch, the Betty→Caroline climb leaving
 exactly one tier tag, case-insensitive matching with exact-case removal,
 unmanaged tags surviving, the bulk results parser (including an unexpected result
@@ -291,7 +292,8 @@ shape confirming nobody), the multipart body keeping every signed parameter in
 order with the file part last, and the client credentials grant — credentials
 exchanged for a token, the token cached across calls, an expired token refetched,
 a mid-run 401 refreshed exactly once, a missing `write_customers` scope named and
-fatal, and a legacy static token never exchanged.
+fatal, `write_customers` alone accepted (Shopify folds read into write and the
+readback collapses the pair), and a legacy static token never exchanged.
 
 Beyond that, the whole job was run end to end against a local PostgreSQL mirror
 of the live schema, seeded with the real 8,672-customer August 2026 census, and a

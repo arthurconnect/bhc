@@ -319,6 +319,23 @@ class ClientCredentialsGrant(unittest.TestCase):
             api.check_credential()
         self.assertIn("write_customers", str(caught.exception))
 
+    def test_write_customers_alone_is_accepted(self):
+        # Shopify collapses the pair: an app granted read+write reads back as
+        # write_customers only, because write already implies read. Requiring
+        # read_customers literally would reject a working credential.
+        _AuthHandler.scope = "write_customers"
+        api = self._client(client_id="cid", client_secret="secret")
+        self.assertEqual(
+            api.check_credential()["myshopifyDomain"], "test.myshopify.com")
+
+    def test_no_customer_scopes_at_all_names_both(self):
+        _AuthHandler.scope = "read_products"
+        api = self._client(client_id="cid", client_secret="secret")
+        with self.assertRaises(CredentialError) as caught:
+            api.check_credential()
+        self.assertIn("read_customers", str(caught.exception))
+        self.assertIn("write_customers", str(caught.exception))
+
     def test_no_credential_at_all_is_fatal(self):
         api = self._client()
         with self.assertRaises(CredentialError):
