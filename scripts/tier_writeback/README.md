@@ -273,9 +273,32 @@ Then spot-check five customers in Shopify admin against the view, including at
 least one `bhc-svip-caroline`, since there are only 77 of them and they are the
 ones Courtney may contact personally.
 
-Klaviyo needs no separate job — its native Shopify integration syncs customer
-tags onto profiles. Verify that in Klaviyo after the first pass rather than
-assuming it.
+## Klaviyo — verified 2026-08-24
+
+No separate job is needed; the native Shopify integration carries the tags
+across. Confirmed against the live Klaviyo API after the first pass rather than
+assumed: Shopify customer `1865798851` reads
+
+```
+"Shopify Tags": ["bhc-star", "bhc-at-risk", "bhc-vip-betty"]
+```
+
+with `updated` about 30 seconds after this job wrote him, and no trace of the
+retired `VIP Betty` — so removals propagate as well as additions.
+
+**The tags arrive as a profile property named `Shopify Tags`, not as a Klaviyo
+tag.** Klaviyo's own tagging feature organises lists, segments, flows and
+campaigns, not people, so these will never appear as a chip on a profile page.
+Look for `Shopify Tags` in the profile properties panel instead. Segment
+conditions find it because they query that property:
+
+```
+Properties about someone → Shopify Tags → contains → bhc-svip-caroline
+```
+
+Match on the exact full tag. `contains "bhc-caroline"` also matches
+`bhc-vip-caroline` and `bhc-svip-caroline` as substrings, which would quietly
+merge three tiers into a segment meant for one.
 
 ## Expected distribution
 
