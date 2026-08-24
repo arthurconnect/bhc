@@ -297,6 +297,47 @@ Engagement and star, for the same 8,672: `bhc-at-risk` 3,238, `bhc-active` 2,768
 If the written distribution differs materially from this, stop and investigate
 rather than re-running.
 
+## First pass: 2026-08-24
+
+Run against the live store in four stages — ten via the single path, ten via the
+bulk path, then the full pass with `--all --mode bulk --execute`.
+
+| | |
+| --- | --- |
+| Census | 8,694 |
+| Attempted / succeeded / failed | 8,679 / 8,679 / **0** |
+| Unchanged (already correct) | 15 |
+| Pending after the run | 0 |
+| Drift vs truth (all three columns) | 0 |
+
+Verified afterwards against a fresh `bulkOperationRunQuery` export of all 55,434
+customer records in the store, not by sampling:
+
+* 8,694 customers carry a `bhc-` tag — exactly the census, no more, no fewer
+* **0** customers with anything other than exactly one tier tag
+* **0** customers with anything other than exactly one engagement tag
+* every tag count matches the view exactly: `bhc-not-tracked` 5,438,
+  `bhc-betty` 1,905, `bhc-caroline` 1,047, `bhc-vip-betty` 187,
+  `bhc-svip-caroline` 78, `bhc-vip-caroline` 39, `bhc-star` 783; engagement
+  3,237 / 2,781 / 2,587 / 89 summing to 8,694
+* 582 retired tags removed (`VIP Betty` 604 → 350, `VIP Caroline` 672 → 344)
+* every unmanaged tag untouched, count for count: `newsletter` 516,
+  `discount code used` 191, `prospect` 166, `Shop` / `Login with Shop` 1,287 each,
+  `Gift card recipient` 7, `Loox - Onsite Reviewer` 6, `Blocked` 2, and the
+  one-offs `C/V`, `Repeat`, `OMFG`
+
+### The 694 retired tags still out there
+
+`VIP Betty` and `VIP Caroline` remain on 694 customers who are **not in
+`customer_tiers`** — no order inside the 36-month window, so the view never
+returns them and `--all` cannot reach them. This is a property of scope, not a
+failure: the job only ever walks the census.
+
+It self-heals for anyone who matters. A dormant customer who orders again enters
+the view and gets their retired tag stripped on the next run. Cleaning the rest
+would need a separate one-off pass keyed off a customer export rather than the
+view.
+
 ## Known limitation carried forward
 
 Order history in Supabase spans exactly 36 months (2023-08-21 onward). `lapsed`
