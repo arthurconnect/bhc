@@ -73,6 +73,7 @@ exported in a shell (editing the env file does not unset what an earlier
 | *(none)* | dry run: prints what it would do, writes nothing |
 | `--execute` | actually write |
 | `--limit N` | only the first N pending customers, ordered by `customer_id` |
+| `--all` | process every customer in `customer_tiers`, not just the changed ones |
 | `--mode single\|bulk\|auto` | force an execution path; `auto` picks bulk above 200 customers |
 | `--detail` | list every planned change, not just the totals |
 | `--poll-timeout` | seconds to wait for a bulk operation (default 3600) |
@@ -130,6 +131,28 @@ Two details worth knowing:
   sends the exact string Shopify holds, so a `BHC-Betty` left over from
   somewhere is actually removed rather than shadowed by a lowercase add.
 
+### Retired tags
+
+`RETIRED_TAGS` in `tags.py` lists tags from the previous hand-maintained scheme
+— currently `VIP Betty` and `VIP Caroline`. They are stripped wherever they are
+found and never written, so the run that installs the new scheme also retires
+the old one rather than leaving two contradictory stories on one record. The
+removable set is `MANAGED_TAGS | RETIRED_TAGS`; everything else on a customer is
+still untouchable.
+
+Two things follow from this:
+
+* **Removing a tag is irreversible**, so nothing goes in that list until it is
+  known that nothing depends on it. As of 2026-08-24 no Klaviyo segment
+  references either of these two — all 13 segment definitions were checked, and
+  they key off location, metrics, profile properties and group membership, not
+  Shopify tags.
+* **`--all` is how a retired tag actually reaches everybody.** The diff query
+  only returns customers whose tier, star or engagement changed, so a customer
+  already up to date is invisible to it — and that is exactly the customer who
+  may still be carrying an old tag. `--all` ignores state and walks the whole
+  view.
+
 Adds are sent before removes. If the removal then fails, the customer briefly
 carries the correct tag *and* a stale one and is not recorded as written, so the
 next run retries the removal. Removing first and failing the add would instead
@@ -153,12 +176,17 @@ A bulk mutation runs exactly one mutation, so adds and removes are two separate
 operations run one after the other. On the first pass there is nothing to remove.
 
 **Single** (`auto` at 200 or fewer). Plain `tagsRemove`/`tagsAdd` per customer —
-the ongoing monthly runs, and the `--limit 10` test batch. This path first reads
-each customer's real tags from Shopify and diffs against *those* rather than
-against `customer_tier_state`, so it self-corrects: a tag removed by hand in
-admin, or a removal that failed on an earlier run, is noticed and fixed. That is
-only affordable at small scale, which is why the bulk path still diffs against
-state.
+the ongoing monthly runs, and the `--limit 10` test batch. This path reads each
+customer's real tags from Shopify one at a time.
+
+**Both paths diff against reality, not against state.** Before writing, the bulk
+path runs a `bulkOperationRunQuery` export of every customer's current tags —
+one export instead of ~8,700 single reads — and diffs against that. This matters
+for more than tidiness: `customer_tier_state` only knows what this job itself
+wrote, so a state-based diff can never remove a tag it did not put there,
+including every retired tag. Diffing against the export also makes both paths
+self-correcting — a tag removed by hand in admin, or a removal that failed on an
+earlier run, is noticed and fixed.
 
 To smoke-test the bulk machinery on a small batch before committing to 8,700:
 
@@ -283,12 +311,12 @@ not a bug, and it resolves only with a deeper backfill.
 | `writeback.py` | CLI, planning, dry-run report, both execution paths |
 | `tags.py` | the tag scheme and the add/remove diff — pure functions |
 | `shopify_api.py` | Admin API client: tagging, staged upload, bulk operations |
-| `db.py` | the source query and `customer_tier_state` reads/writes |
+| `db.py` | the source query, the `--all` query, and `customer_tier_state` reads/writes |
 | `test_tags.py` | unit tests for the tag scheme, the diff, the bulk results parser and the staged-upload body |
 
 ## Validation
 
-`python3 test_tags.py` — 33 tests, no credentials or live network needed. Covers
+`python3 test_tags.py` — 36 tests, no credentials or live network needed. Covers
 the tag table, the `at_risk`/`at-risk` mismatch, the Betty→Caroline climb leaving
 exactly one tier tag, case-insensitive matching with exact-case removal,
 unmanaged tags surviving, the bulk results parser (including an unexpected result
@@ -298,12 +326,14 @@ exchanged for a token, the token cached across calls, an expired token refetched
 a mid-run 401 refreshed exactly once, a missing `write_customers` scope named and
 fatal, `write_customers` alone accepted (Shopify folds read into write and the
 readback collapses the pair), and a legacy static token never exchanged. Also the credential precedence
-rules, so a stale `SHOPIFY_ADMIN_TOKEN` cannot shadow the client credentials.
+rules, so a stale `SHOPIFY_ADMIN_TOKEN` cannot shadow the client credentials, and
+retired tags — stripped when found, never written, matched case-insensitively but
+removed with the exact string Shopify holds.
 
 Beyond that, the whole job was run end to end against a local PostgreSQL mirror
 of the live schema, seeded with the real 8,672-customer August 2026 census, and a
 stand-in Shopify Admin API, authenticating through the client credentials grant.
-54 checks, all passing:
+65 checks, all passing:
 
 * a dry run leaves both Shopify and `customer_tier_state` untouched
 * a full `--execute` before any test batch is refused, having written nothing
@@ -320,6 +350,11 @@ stand-in Shopify Admin API, authenticating through the client credentials grant.
   leaves every customer pending
 * a bulk mutation already in flight, a missing credential (in dry run too), and
   an unmapped tier value each stop the run before any write
+* the bulk path exports real tags before writing, and retires `VIP Betty` /
+  `VIP Caroline` in the same pass that writes the new scheme, leaving unmanaged
+  tags like `Wholesale` alone
+* a retired tag reappearing on a customer whose tier state is already correct is
+  invisible to a normal run and cleaned up by `--all`
 
 The stand-in API is a test harness, not a mock of Shopify's semantics: it proves
 the job's own logic and wire format. The first real `--limit 10 --execute`

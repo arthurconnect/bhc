@@ -135,16 +135,43 @@ class Diff(unittest.TestCase):
         self.assertEqual((add, remove), ([], []))
 
 
-class StateMirror(unittest.TestCase):
-    def test_empty_state_means_nothing_known(self):
-        self.assertEqual(tags.tags_from_state(None, None, None), frozenset())
+class RetiredTags(unittest.TestCase):
+    """Tags from the old hand-maintained scheme are stripped, never written."""
 
-    def test_state_round_trips_through_the_tag_scheme(self):
+    def test_a_retired_tag_is_removed_when_found(self):
+        add, remove = tags.diff(
+            ["VIP Betty"], tags.desired_tags("Backyard Betty", True, "active"))
+        self.assertEqual(add, ["bhc-active", "bhc-betty", "bhc-star"])
+        self.assertEqual(remove, ["VIP Betty"])
+
+    def test_retired_tags_are_never_added(self):
+        for tier in tags.TIER_TAGS:
+            for engagement in tags.ENGAGEMENT_TAGS:
+                for star in (True, False):
+                    desired = tags.desired_tags(tier, star, engagement)
+                    self.assertFalse(desired & tags.RETIRED_TAGS)
+
+    def test_a_customer_can_shed_old_and_gain_new_in_one_pass(self):
+        add, remove = tags.diff(
+            ["VIP Caroline", "Wholesale"],
+            tags.desired_tags("SVIP Country Club Caroline", True, "at_risk"))
         self.assertEqual(
-            tags.tags_from_state("VIP Country Club Caroline", True, "at_risk"),
-            tags.desired_tags("VIP Country Club Caroline", True, "at_risk"),
-        )
+            add, ["bhc-at-risk", "bhc-star", "bhc-svip-caroline"])
+        self.assertEqual(remove, ["VIP Caroline"])
+        self.assertNotIn("Wholesale", remove)
 
+    def test_retired_tags_match_case_insensitively_but_remove_exactly(self):
+        add, remove = tags.diff(
+            ["vip betty"], tags.desired_tags("Backyard Betty", False, "active"))
+        self.assertEqual(remove, ["vip betty"])
+
+    def test_removable_is_managed_plus_retired_and_nothing_else(self):
+        self.assertEqual(tags.REMOVABLE_TAGS,
+                         tags.MANAGED_TAGS | tags.RETIRED_TAGS)
+        self.assertFalse(tags.MANAGED_TAGS & tags.RETIRED_TAGS)
+
+
+class Identifiers(unittest.TestCase):
     def test_gid_round_trip(self):
         self.assertEqual(tags.gid(1865798851), "gid://shopify/Customer/1865798851")
         self.assertEqual(

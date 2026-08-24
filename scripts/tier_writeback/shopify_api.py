@@ -62,6 +62,26 @@ mutation bulkOperationRunMutation($mutation: String!, $stagedUploadPath: String!
 }
 """.strip()
 
+_RUN_BULK_QUERY = """
+mutation bulkOperationRunQuery($query: String!) {
+  bulkOperationRunQuery(query: $query) {
+    bulkOperation { id status type url partialDataUrl objectCount errorCode createdAt }
+    userErrors { field message }
+  }
+}
+""".strip()
+
+# The export the bulk write path diffs against. Reading every customer's real
+# tags is what lets a bulk run remove a stale or retired tag it never wrote -
+# customer_tier_state only knows what this job put there.
+CUSTOMER_TAGS_EXPORT = """
+{
+  customers {
+    edges { node { id tags } }
+  }
+}
+""".strip()
+
 _POLL_QUERY = """
 query bulkOperationById($id: ID!) {
   bulkOperation(id: $id) {
@@ -336,18 +356,72 @@ class ShopifyAdmin:
 
     # ---------------------------------------------------------------- bulk
 
-    def running_bulk_mutation(self):
-        """A MUTATION bulk operation already in flight, if any.
+    def running_bulk(self, kind="MUTATION"):
+        """A bulk operation of `kind` already in flight, if any.
 
-        Shopify runs one bulk mutation at a time per shop, so starting a second
-        would simply be rejected. Checking first turns that into a clear message.
+        Shopify runs one bulk query and one bulk mutation at a time per shop,
+        so a second of either kind is simply rejected. Checking first turns
+        that into a clear message instead of a mid-flight failure.
         """
         data = self.graphql(_RUNNING_QUERY)
         nodes = ((data or {}).get("bulkOperations") or {}).get("nodes") or []
         for node in nodes:
-            if node.get("type") == "MUTATION":
+            if node.get("type") == kind:
                 return node
         return None
+
+    def run_bulk_query(self, query):
+        data = self.graphql(_RUN_BULK_QUERY, {"query": query})
+        result = (data or {}).get("bulkOperationRunQuery") or {}
+        errors = result.get("userErrors") or []
+        if errors:
+            raise ShopifyError(f"bulkOperationRunQuery: {errors}")
+        operation = result.get("bulkOperation")
+        if not operation or not operation.get("id"):
+            raise ShopifyError("bulkOperationRunQuery returned no bulk operation")
+        return operation
+
+    def export_customer_tags(self, poll_timeout=3600):
+        """Every customer's current tags, as {customer_id: [tag, ...]}.
+
+        One bulk export instead of ~8,700 single reads. A customer absent from
+        the result simply is not in Shopify, which the caller records as a
+        per-customer error rather than silently skipping.
+        """
+        from tags import customer_id_from_gid
+
+        running = self.running_bulk("QUERY")
+        if running:
+            raise ShopifyError(
+                f"a bulk query is already running on this shop "
+                f"({running['id']}, {running['status']}); wait for it to finish"
+            )
+        operation = self.run_bulk_query(CUSTOMER_TAGS_EXPORT)
+        self.log(f"  started export {operation['id']}")
+        operation = self.poll_bulk(operation["id"], timeout=poll_timeout)
+        if operation.get("status") != "COMPLETED":
+            raise ShopifyError(
+                f"customer tag export ended {operation.get('status')} "
+                f"(errorCode={operation.get('errorCode')}); nothing was written"
+            )
+        url = operation.get("url")
+        if not url:
+            # A completed export with no file means it matched zero customers.
+            return {}
+
+        tags_by_customer = {}
+        for line in self.download(url).decode(errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                node = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            customer_id = customer_id_from_gid(node.get("id"))
+            if customer_id is not None:
+                tags_by_customer[customer_id] = list(node.get("tags") or [])
+        return tags_by_customer
 
     def staged_upload_target(self, filename):
         """A staged upload slot for bulk mutation variables.

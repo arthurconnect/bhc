@@ -33,13 +33,23 @@ ENGAGEMENT_TAGS = {
 
 STAR_TAG = "bhc-star"
 
-# The only tags this job is ever allowed to remove. A bhc- tag that isn't in
-# here - one Courtney added by hand, say - is left strictly alone.
+# The tags this job writes.
 MANAGED_TAGS = frozenset(
     set(TIER_TAGS.values()) | set(ENGAGEMENT_TAGS.values()) | {STAR_TAG}
 )
 
-_MANAGED_NORM = frozenset(tag.casefold() for tag in MANAGED_TAGS)
+# Tags from the previous, hand-maintained scheme. Stripped wherever they turn
+# up and never written, so the run that installs the new scheme also retires
+# the old one instead of leaving two contradictory stories on the same record.
+# Removing a tag is irreversible, so nothing belongs here that anything still
+# depends on - as of 2026-08-24 no Klaviyo segment references either of these.
+RETIRED_TAGS = frozenset({"VIP Betty", "VIP Caroline"})
+
+# The complete set this job may remove. Everything else on a customer - a
+# `Wholesale` tag, a hand-added `bhc-` one - is left strictly alone.
+REMOVABLE_TAGS = frozenset(MANAGED_TAGS | RETIRED_TAGS)
+
+_REMOVABLE_NORM = frozenset(tag.casefold() for tag in REMOVABLE_TAGS)
 
 
 class UnmappedValue(Exception):
@@ -61,24 +71,6 @@ def desired_tags(tier, is_repeat_customer, engagement_state):
     return frozenset(tags)
 
 
-def tags_from_state(tier_written, star_written, engagement_written):
-    """Rebuild the tag set customer_tier_state claims Shopify is carrying.
-
-    A NULL column means "we have never written that one", not "it is absent
-    from Shopify" - but on the first pass the two are the same thing, and on
-    later passes this is the only record we have. The single-customer path
-    reads the real tags off Shopify instead and doesn't use this.
-    """
-    tags = set()
-    if tier_written is not None:
-        tags.add(TIER_TAGS.get(tier_written, tier_written))
-    if engagement_written is not None:
-        tags.add(ENGAGEMENT_TAGS.get(engagement_written, engagement_written))
-    if star_written:
-        tags.add(STAR_TAG)
-    return frozenset(tags)
-
-
 def diff(current, desired):
     """(tags_to_add, tags_to_remove) to move `current` to `desired`.
 
@@ -87,7 +79,8 @@ def diff(current, desired):
     exact string Shopify holds - otherwise tagsRemove("bhc-betty") would leave a
     stray "BHC-Betty" behind.
 
-    Removals are intersected with MANAGED_TAGS: a customer's other tags, bhc-
+    Removals are intersected with REMOVABLE_TAGS - the tags this job writes,
+    plus the retired ones it is cleaning up. A customer's other tags, bhc-
     prefixed or not, are never touched.
     """
     by_norm = {}
@@ -102,7 +95,7 @@ def diff(current, desired):
     remove = sorted(
         original
         for norm, original in by_norm.items()
-        if norm in _MANAGED_NORM and norm not in desired_norm
+        if norm in _REMOVABLE_NORM and norm not in desired_norm
     )
     return add, remove
 

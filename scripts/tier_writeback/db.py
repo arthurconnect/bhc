@@ -31,6 +31,22 @@ order by t.customer_id
 """
 
 
+ALL_SQL = """
+select
+  t.customer_id,
+  t.customer_email,
+  t.tier,
+  t.is_repeat_customer,
+  t.engagement_state,
+  s.tier_written,
+  s.star_written,
+  s.engagement_written
+from customer_tiers t
+left join customer_tier_state s on s.customer_id = t.customer_id
+order by t.customer_id
+"""
+
+
 def connect(dsn):
     conn = psycopg2.connect(dsn)
     conn.autocommit = True          # each customer's state lands on its own
@@ -39,6 +55,18 @@ def connect(dsn):
 
 def fetch_pending(conn, limit=None):
     sql = PENDING_SQL + ("\nlimit %s" % int(limit) if limit else "")
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(sql)
+        return [dict(row) for row in cur.fetchall()]
+
+
+def fetch_all(conn, limit=None):
+    """Every customer in the view, regardless of what state says.
+
+    A tag retired from the scheme has to reach customers whose tier state is
+    already correct, and the diff query by definition skips those.
+    """
+    sql = ALL_SQL + ("\nlimit %s" % int(limit) if limit else "")
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(sql)
         return [dict(row) for row in cur.fetchall()]

@@ -139,16 +139,30 @@ def build_plan(rows):
     return plan
 
 
-def plan_from_state(plan):
-    """Compute add/remove from customer_tier_state (the bulk path)."""
+def plan_from_bulk_export(api, plan, poll_timeout):
+    """Compute add/remove from a bulk export of every customer's real tags.
+
+    The bulk path used to diff against customer_tier_state, which only knows
+    what this job itself wrote - so it could never remove a tag it did not put
+    there, including the retired ones from the old scheme. Diffing against a
+    real export fixes that and makes the bulk path behave exactly like the
+    single path, one export instead of thousands of reads.
+    """
+    api.log("exporting every customer's current tags from Shopify so removals "
+            "are computed from reality ...")
+    actual = api.export_customer_tags(poll_timeout)
+    api.log(f"  {len(actual)} customers in the export")
+
     for entry in plan:
-        row = entry["state"]
-        known = tags.tags_from_state(
-            row.get("tier_written"), row.get("star_written"),
-            row.get("engagement_written"),
-        )
-        entry["add"], entry["remove"] = tags.diff(known, entry["desired"])
-        entry["source"] = "state"
+        current = actual.get(entry["customer_id"])
+        if current is None:
+            entry["error"] = "customer does not exist in Shopify"
+            entry["add"], entry["remove"] = [], []
+            entry["source"] = "error"
+            continue
+        entry["current"] = current
+        entry["add"], entry["remove"] = tags.diff(current, entry["desired"])
+        entry["source"] = "shopify-bulk"
     return plan
 
 
@@ -360,7 +374,7 @@ def _run_bulk_operation(api, kind, mutation, field, entries, poll_timeout):
 
 
 def execute_bulk(api, conn, plan, poll_timeout):
-    running = api.running_bulk_mutation()
+    running = api.running_bulk("MUTATION")
     if running:
         raise SystemExit(
             f"A bulk mutation is already running on this shop "
@@ -416,6 +430,11 @@ def main():
                         help="actually write to Shopify (default is a dry run)")
     parser.add_argument("--limit", type=int, metavar="N",
                         help="only process the first N pending customers")
+    parser.add_argument("--all", action="store_true", dest="process_all",
+                        help="process every customer in customer_tiers, not just "
+                             "the ones the diff query flags as changed. Needed to "
+                             "retire an old tag from customers whose tier state is "
+                             "already up to date.")
     parser.add_argument("--mode", choices=("auto", "single", "bulk"), default="auto",
                         help="auto picks bulk above %d customers; --mode bulk with "
                              "--limit 10 smoke-tests the bulk path" % BULK_THRESHOLD)
@@ -460,7 +479,10 @@ def main():
     if args.limit:
         log(f"limit     : {args.limit}")
 
-    rows = db.fetch_pending(conn, args.limit)
+    rows = (db.fetch_all(conn, args.limit) if args.process_all
+            else db.fetch_pending(conn, args.limit))
+    if args.process_all:
+        log("scope     : every customer in customer_tiers (--all)")
     if not rows:
         log()
         log("Nothing to do: customer_tier_state already agrees with customer_tiers.")
@@ -477,7 +499,8 @@ def main():
             "rather than against customer_tier_state ...")
         plan_from_shopify(api, plan)
     else:
-        plan_from_state(plan)
+        log()
+        plan_from_bulk_export(api, plan, args.poll_timeout)
 
     changed, unchanged, broken = describe_plan(
         plan, mode, args.detail or len(plan) <= 25)
