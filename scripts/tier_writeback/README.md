@@ -19,9 +19,10 @@ customer_tier_state ─────┘
 ## Run it
 
 ```bash
-export SUPABASE_DB_URL='postgresql://postgres.wgnrfautxbhkfyltqkuf:<password>@<host>:5432/postgres'
+export SUPABASE_DB_URL='host=<host> port=5432 dbname=postgres user=postgres.wgnrfautxbhkfyltqkuf password=<password>'
 export SHOPIFY_SHOP='the-birdhouse-chick-2.myshopify.com'
-export SHOPIFY_ADMIN_TOKEN='shpat_...'
+export SHOPIFY_CLIENT_ID='...'
+export SHOPIFY_CLIENT_SECRET='...'
 pip install psycopg2-binary
 
 python3 scripts/tier_writeback/writeback.py                      # dry run (default)
@@ -30,9 +31,38 @@ python3 scripts/tier_writeback/writeback.py --limit 10 --execute # the test batc
 python3 scripts/tier_writeback/writeback.py --execute            # the full pass
 ```
 
-The Admin API token needs `read_customers` and `write_customers`. The connection
-string is in the Supabase dashboard under *Project Settings → Database →
-Connection string*.
+`SUPABASE_DB_URL` accepts either the libpq keyword form above or a
+`postgresql://` URI. The keyword form is worth preferring: it takes the password
+literally, so a `@`, `#` or `%` in it doesn't need percent-encoding. Copy the
+host from the Supabase dashboard's **Connect** button (*Direct → Connection
+string → Session pooler*); the session pooler is the IPv4-reachable endpoint,
+where the direct connection is IPv6-only.
+
+## Shopify credentials
+
+Shopify has **retired admin-created custom apps** — the flow that produced a
+long-lived `shpat_` token from *Settings → Apps → Develop apps*. New apps are
+created in the [Dev Dashboard](https://shopify.dev/docs/apps/build/dev-dashboard),
+and a Dev Dashboard app never shows a token in the admin at all. It authenticates
+with the **client credentials grant**: the app exchanges its client id and secret
+for an access token that lives 24 hours, and requests another when that runs out.
+This script does that exchange itself and refreshes as needed.
+
+Setting the app up:
+
+1. Dev Dashboard → **Apps** → **Create app** → *Start from Dev Dashboard*, name it
+2. **Versions** → set the scopes to `read_customers,write_customers`
+   (App URL can stay at its default; this app has no UI) → **Release**
+3. App **Home** → scroll to **Install app** → pick the store → **Install**
+4. **App settings** → copy the **Client ID** and **Secret**
+
+The app and the store must be in the same Shopify organization, or the token
+request fails with `shop_not_permitted`. The script surfaces that message
+verbatim, because the fix is an org membership change rather than anything it
+can retry.
+
+`SHOPIFY_ADMIN_TOKEN` is still accepted for a legacy custom app that already
+exists; set either that or the client id/secret pair.
 
 | Flag | Effect |
 | --- | --- |
@@ -152,6 +182,8 @@ from prose:
 | `bulkOperationRunMutation` args | `mutation: String!`, `stagedUploadPath: String!`, optional `clientIdentifier` |
 | `tagsAdd` / `tagsRemove` | `(id: ID!, tags: [String!]!)` → `{ node { id } userErrors { field message } }` |
 | polling | `bulkOperation(id: ID!)` |
+| token endpoint | `POST https://{shop}/admin/oauth/access_token`, form-encoded `grant_type=client_credentials` + `client_id` + `client_secret` |
+| token response | `{access_token, scope, expires_in}`; `expires_in` is 86399 (24h), and `scope` reads back what the app's released version actually grants |
 
 Two places where the spec would have gone wrong if followed literally:
 
@@ -163,6 +195,19 @@ Two places where the spec would have gone wrong if followed literally:
   query and a bulk mutation can run concurrently; it is two bulk *mutations* that
   cannot. The job checks for a running mutation before starting and refuses with
   a clear message rather than being rejected mid-flight.
+
+The credential shape changed under the spec too: it assumed a `shpat_` token,
+which Shopify no longer issues for new apps. Because the token response echoes
+the granted scopes, the credential check fails immediately and by name when
+`write_customers` is missing, rather than letting that surface later as an
+opaque per-customer permission error.
+
+One thing that is **not** verified: the docs mark bulk operations "only
+accessible by supported access tokens" without enumerating them, and there was
+no way to confirm from the docs that a client-credentials token qualifies. It is
+an ordinary offline Admin token, so it should — but that is reasoning, not
+evidence, which is the specific reason to run `--limit 10 --mode bulk --execute`
+before the full pass.
 
 ## Error handling
 
@@ -238,16 +283,20 @@ not a bug, and it resolves only with a deeper backfill.
 
 ## Validation
 
-`python3 test_tags.py` — 20 tests, no credentials or network needed. Covers the
-tag table, the `at_risk`/`at-risk` mismatch, the Betty→Caroline climb leaving
+`python3 test_tags.py` — 27 tests, no credentials or live network needed. Covers
+the tag table, the `at_risk`/`at-risk` mismatch, the Betty→Caroline climb leaving
 exactly one tier tag, case-insensitive matching with exact-case removal,
 unmanaged tags surviving, the bulk results parser (including an unexpected result
-shape confirming nobody), and the multipart body keeping every signed parameter
-in order with the file part last.
+shape confirming nobody), the multipart body keeping every signed parameter in
+order with the file part last, and the client credentials grant — credentials
+exchanged for a token, the token cached across calls, an expired token refetched,
+a mid-run 401 refreshed exactly once, a missing `write_customers` scope named and
+fatal, and a legacy static token never exchanged.
 
 Beyond that, the whole job was run end to end against a local PostgreSQL mirror
 of the live schema, seeded with the real 8,672-customer August 2026 census, and a
-stand-in Shopify Admin API. 54 checks, all passing:
+stand-in Shopify Admin API, authenticating through the client credentials grant.
+54 checks, all passing:
 
 * a dry run leaves both Shopify and `customer_tier_state` untouched
 * a full `--execute` before any test batch is refused, having written nothing
@@ -262,8 +311,8 @@ stand-in Shopify Admin API. 54 checks, all passing:
   as written, does not stop its neighbours, and is retried on the next run
 * a bulk results file in an unexpected shape confirms nobody, warns loudly, and
   leaves every customer pending
-* a bulk mutation already in flight, a rejected token (in dry run too), and an
-  unmapped tier value each stop the run before any write
+* a bulk mutation already in flight, a missing credential (in dry run too), and
+  an unmapped tier value each stop the run before any write
 
 The stand-in API is a test harness, not a mock of Shopify's semantics: it proves
 the job's own logic and wire format. The first real `--limit 10 --execute`
